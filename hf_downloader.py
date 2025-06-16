@@ -2,8 +2,14 @@
 """
 高级 Hugging Face 下载器
 支持详细进度显示、进度保存和断点续传
+支持通过 hf-mirror.com 镜像站加速下载（国内用户推荐）
 
 pyinstaller --onefile -w --name "hf_downloader" hf_downloader.py
+
+镜像站说明：
+- hf-mirror.com 是 Hugging Face 的国内镜像站
+- 可以为国内用户提供更快的下载速度
+- 镜像站由公益组织维护，感谢其贡献
 """
 
 # 修复Windows下的Unicode编码问题
@@ -411,18 +417,20 @@ class AdvancedDownloader:
     """高级下载器"""
     
     def __init__(self, repo_id: str, token: Optional[str] = None, 
-                 progress_file: str = "download_progress.json"):
+                 progress_file: str = "download_progress.json",
+                 endpoint: str = "https://huggingface.co"):
         self.repo_id = repo_id
         self.token = token
+        self.endpoint = endpoint
         self.progress = ProgressTracker(progress_file)
-        self.api = HfApi(token=token)
+        self.api = HfApi(token=token, endpoint=endpoint)
         self.stop_flag = threading.Event()
         
     def get_file_info(self, filename: str) -> Dict[str, Any]:
         """获取文件信息"""
         try:
-            # 尝试获取文件大小
-            url = f"https://huggingface.co/{self.repo_id}/resolve/main/{filename}"
+            # 使用指定的端点
+            url = f"{self.endpoint}/{self.repo_id}/resolve/main/{filename}"
             headers = {}
             if self.token:
                 headers['Authorization'] = f'Bearer {self.token}'
@@ -470,7 +478,8 @@ class AdvancedDownloader:
                     filename=filename,
                     local_dir=local_dir,
                     token=self.token,
-                    force_download=False  # 支持断点续传
+                    force_download=False,  # 支持断点续传
+                    endpoint=self.endpoint
                 )
                 
                 # 获取文件大小
@@ -503,7 +512,7 @@ class AdvancedDownloader:
         
         try:
             # 获取所有文件列表
-            all_files = list_repo_files(repo_id=self.repo_id, token=self.token)
+            all_files = self.api.list_repo_files(repo_id=self.repo_id)
             
             # 应用文件过滤
             if file_patterns:
@@ -616,9 +625,41 @@ class AdvancedDownloader:
         self.stop_flag.set()
         print("\n⏹️ 正在停止下载...")
 
+version = "1.0"
+git_url = "https://github.com/void-gfly/hf_downloader"
+
+def parse_repo_url(url: str):
+    """
+    解析仓库URL，返回 (repo_id, is_mirror, endpoint)
+    支持：
+    - https://huggingface.co/username/repo
+    - https://hf-mirror.com/username/repo
+    - https://huggingface.co/username/repo/tree/branch
+    """
+    url = url.rstrip('/')
+    
+    # 检查是否是镜像站链接
+    if 'hf-mirror.com' in url:
+        is_mirror = True
+        endpoint = 'https://hf-mirror.com'
+        # 从镜像站URL提取repo_id
+        if '/tree/' in url:
+            repo_id = url.split('/tree/')[0].replace('https://hf-mirror.com/', '')
+        else:
+            repo_id = url.replace('https://hf-mirror.com/', '')
+    else:
+        is_mirror = False
+        endpoint = 'https://huggingface.co'
+        # 从官方URL提取repo_id
+        if '/tree/' in url:
+            repo_id = url.split('/tree/')[0].replace('https://huggingface.co/', '')
+        else:
+            repo_id = url.replace('https://huggingface.co/', '')
+    
+    return repo_id, is_mirror, endpoint
 
 @Gooey(
-    program_name="Hugging Face批量下载器 v1.0 by proly",
+    program_name=f"Hugging Face批量下载器 v{version} {git_url}",
     program_description="支持详细进度显示和断点续传的下载工具",
     default_size=(1920,1440),
     header_height=160,
@@ -647,8 +688,8 @@ def main():
     basic_group = parser.add_argument_group("基本设置")
     basic_group.add_argument(
         'url',
-        metavar='Hugging Face URL',
-        help='Hugging Face 仓库链接（自动加载上次使用的URL）',
+        metavar='仓库链接',
+        help='支持官方链接或镜像站链接:\n官方: https://huggingface.co/用户名/仓库名\n镜像: https://hf-mirror.com/用户名/仓库名（自动加载上次使用的URL）',
         widget='TextField',
         default=last_settings['url']
     )
@@ -706,6 +747,8 @@ def main():
         default=last_settings['progress_file']
     )
     
+
+    
     args = parser.parse_args()
     
     # 保存当前设置
@@ -720,13 +763,8 @@ def main():
     }
     settings_manager.save_settings(current_settings)
     
-    # 解析URL
-    url = args.url.rstrip('/')
-    if '/tree/' in url:
-        repo_id = url.split('/tree/')[0].replace('https://huggingface.co/', '')
-    else:
-        repo_id = url.replace('https://huggingface.co/', '')
-    
+    # 解析URL，支持镜像站
+    repo_id, is_mirror, endpoint = parse_repo_url(args.url)
     token = args.token.strip() if args.token.strip() else None
     
     # 处理文件模式
@@ -743,6 +781,23 @@ def main():
     print(f"🔧 并发数: {args.max_workers}")
     print(f"📄 进度文件: {args.progress_file}")
     
+    # 显示下载源信息
+    if is_mirror:
+        print(f"🌐 使用镜像站: {endpoint}")
+        
+        # 测试镜像站连接
+        try:
+            response = requests.head(endpoint, timeout=5)
+            if response.status_code == 200:
+                print(f"✅ 镜像站连接正常")
+            else:
+                print(f"⚠️ 镜像站响应异常 (状态码: {response.status_code})")
+        except Exception as e:
+            print(f"⚠️ 镜像站连接测试失败: {e}")
+            print(f"💡 将继续尝试使用镜像站，如遇问题请使用官方链接")
+    else:
+        print(f"🌐 使用官方站点: {endpoint}")
+    
     # 显示文件过滤设置
     if include_patterns:
         print(f"📥 包含模式: {include_patterns}")
@@ -758,7 +813,8 @@ def main():
     downloader = AdvancedDownloader(
         repo_id=repo_id,
         token=token,
-        progress_file=args.progress_file
+        progress_file=args.progress_file,
+        endpoint=endpoint
     )
     
     # 创建输出目录
